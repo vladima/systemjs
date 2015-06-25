@@ -1,5 +1,5 @@
 /*
- * SystemJS v0.16.11
+ * SystemJS v0.18.2
  */
 (function() {
 function bootstrap() {(function(__global) {
@@ -8,8 +8,8 @@ function bootstrap() {(function(__global) {
   var isBrowser = typeof window != 'undefined' && typeof document != 'undefined';
   var isWindows = typeof process != 'undefined' && !!process.platform.match(/^win/);
 
-  if (__global.console)
-    console.assert = console.assert || function() {};
+  if (!__global.console)
+    __global.console = { assert: function() {} };
 
   // IE8 support
   var indexOf = Array.prototype.indexOf || function(item) {
@@ -41,8 +41,15 @@ function bootstrap() {(function(__global) {
     var newErr;
     if (err instanceof Error) {
       var newErr = new Error(err.message, err.fileName, err.lineNumber);
-      newErr.message = err.message + '\n\t' + msg;
-      newErr.stack = err.stack;
+      if (isBrowser) {
+        newErr.message = err.message + '\n\t' + msg;
+        newErr.stack = err.stack;
+      }
+      else {
+        // node errors only look correct with the stack modified
+        newErr.message = err.message;
+        newErr.stack = err.stack + '\n\t' + msg;
+      }
     }
     else {
       newErr = err + '\n\t' + msg;
@@ -60,10 +67,7 @@ function bootstrap() {(function(__global) {
     }
   }
 
-  var URL = __global.URL || URLPolyfill;
-
   var baseURI;
-
   // environent baseURI detection
   if (typeof document != 'undefined' && document.getElementsByTagName) {
     baseURI = document.baseURI;
@@ -87,6 +91,14 @@ function bootstrap() {(function(__global) {
   }
   else {
     throw new TypeError('No environment baseURI');
+  }
+
+  var URL = __global.URL;
+  try {
+    new URL('test:///').protocol == 'test:';
+  }
+  catch(e) {
+    URL = URLPolyfill;
   }
 /*
 *********************************************************************************************
@@ -610,13 +622,13 @@ function logloads(loads) {
 
     if (load) {
       if (load && linkSet.loads[0].name != load.name)
-        exc = addToError(exc, 'Error loading "' + load.name + '" from "' + linkSet.loads[0].name + '" at ' + (linkSet.loads[0].address || '<unknown>'));
+        exc = addToError(exc, 'Error loading ' + load.name + ' from ' + linkSet.loads[0].name);
 
       if (load)
-        exc = addToError(exc, 'Error loading "' + load.name + '" at ' + (load.address || '<unknown>'));
+        exc = addToError(exc, 'Error loading ' + load.name);
     }
     else {
-      exc = addToError(exc, 'Error linking "' + linkSet.loads[0].name + '" at ' + (linkSet.loads[0].address || '<unknown>'));
+      exc = addToError(exc, 'Error linking ' + linkSet.loads[0].name);
     }
 
 
@@ -893,6 +905,10 @@ function logloads(loads) {
   }
 
   function doEnsureEvaluated() {}
+
+  function transpile() {
+    throw new TypeError('ES6 transpilation is only provided in the dev module loader build.');
+  }
 })();/*
 *********************************************************************************************
 
@@ -907,22 +923,18 @@ function logloads(loads) {
 
 var System;
 
-function SystemLoader(baseURL) {
+function SystemLoader() {
   Loader.call(this);
-
-  baseURL = baseURL || baseURI;
-
-  this.baseURL = baseURL;
   this.paths = {};
 }
 
 // NB no specification provided for System.paths, used ideas discussed in https://github.com/jorendorff/js-loaders/issues/25
-function applyPaths(loader, name) {
+function applyPaths(paths, name) {
   // most specific (most number of slashes in path) match wins
   var pathMatch = '', wildcard, maxSlashCount = 0;
 
   // check to see if we have a paths entry
-  for (var p in loader.paths) {
+  for (var p in paths) {
     var pathParts = p.split('*');
     if (pathParts.length > 2)
       throw new TypeError('Only one wildcard in a path is permitted');
@@ -947,7 +959,7 @@ function applyPaths(loader, name) {
     }
   }
 
-  var outPath = loader.paths[pathMatch] || name;
+  var outPath = paths[pathMatch] || name;
   if (wildcard)
     outPath = outPath.replace('*', wildcard);
 
@@ -1028,8 +1040,14 @@ SystemLoader.prototype = new LoaderProto();
       return fs.readFile(url, function(err, data) {
         if (err)
           return reject(err);
-        else
-          fulfill(data + '');
+        else {
+          // Strip Byte Order Mark out if it's the leading char
+          var dataString = data + '';
+          if (dataString[0] === '\ufeff')
+            dataString = dataString.substr(1);
+
+          fulfill(dataString);
+        }
       });
     };
   }
@@ -1052,7 +1070,7 @@ var transpile = (function() {
   function transpile(load) {
     var self = this;
 
-    return Promise.resolve(__global[self.transpiler == 'typescript' ? 'ts' : self.transpiler] 
+    return Promise.resolve(__global[self.transpiler == 'typescript' ? 'ts' : self.transpiler]
         || (self.pluginLoader || self)['import'](self.transpiler))
     .then(function(transpiler) {
       if (transpiler.__useDefault)
@@ -1066,37 +1084,8 @@ var transpile = (function() {
       else
         transpileFunction = babelTranspile;
 
-      return 'var __moduleName = "' + load.name + '", __moduleAddress = "' + load.address + '";'
-          + transpileFunction.call(self, load, transpiler)
-          + '\n//# sourceURL=' + load.address + '!eval';
-
-      // sourceURL and sourceMappingURL:
-      //   Ideally we wouldn't need a sourceURL and would just use the sourceMap.
-      //   But without the sourceURL as well, line-by-line debugging doesn't work.
-      //   We thus need to ensure the sourceURL is a different name to the original
-      //   source, and hence the !eval suffix.
-    });
-  };
-
-  Loader.prototype.instantiate = function(load) {
-    var self = this;
-    return Promise.resolve(self.normalize(self.transpiler))
-    .then(function(transpilerNormalized) {
-      // load transpiler as a global (avoiding System clobbering)
-      if (load.address === transpilerNormalized) {
-        return {
-          deps: [],
-          execute: function() {
-            var curSystem = __global.System;
-            var curLoader = __global.Reflect.Loader;
-            // ensure not detected as CommonJS
-            __eval('(function(require,exports,module){' + load.source + '})();', load.address, __global);
-            __global.System = curSystem;
-            __global.Reflect.Loader = curLoader;
-            return self.newModule({ 'default': __global[self.transpiler], __useDefault: true });
-          }
-        };
-      }
+      // note __moduleName will be part of the transformer meta in future when we have the spec for this
+      return 'var __moduleName = "' + load.name + '";' + transpileFunction.call(self, load, transpiler) + '\n//# sourceURL=' + load.address + '!transpiled';
     });
   };
 
@@ -1127,6 +1116,7 @@ var transpile = (function() {
     var options = this.babelOptions || {};
     options.modules = 'system';
     options.sourceMap = 'inline';
+    options.inputSourceMap = load.metadata.sourceMap;
     options.filename = load.address;
     options.code = true;
     options.ast = false;
@@ -1142,8 +1132,7 @@ var transpile = (function() {
     options.module = ts.ModuleKind.System;
     options.inlineSourceMap = true;
 
-    var source = ts.transpile(load.source, options, load.address);
-    return source + '\n//# sourceURL=' + load.address + '!eval';;
+    return ts.transpile(load.source, options, load.address);
   }
 
   return transpile;
@@ -1163,59 +1152,57 @@ var __exec;
   function postExec() {
     __global.System = curSystem;
   }
+  console.log('');
+}
+function logloads(loads) {
+  var log = '';
+  for (var k = 0; k < loads.length; k++)
+    log += loads[k].name + (k != loads.length - 1 ? ' ' : '');
+  return log;
+} */
 
-  // support sourceMappingURL extraction and normalization efficiently
-  function getSource(load, globals, thisValue) {
-    var sourceMappingURL;
+  var hasBtoa = typeof btoa != 'undefined';
+
+  function getSource(load) {
     var lastLineIndex = load.source.lastIndexOf('\n');
-    if (lastLineIndex != -1) {
-      if (load.source.substr(lastLineIndex + 1, 21) == '//# sourceMappingURL=') {
-        sourceMappingURL = load.source.substr(lastLineIndex + 22, load.source.length - lastLineIndex - 22);
-        sourceMappingURL = new URL(sourceMappingURL, load.address).href;
-      }
-    }
 
-    // optional global scoping
-    var globalPrefix = '';
-    var globalSuffix = '';
-    if (globals) {
-      __global._g = globals;
-      for (var g in globals) {
-        if (!globalPrefix) {
-          globalPrefix = '(function(' + g;
-          globalSuffix = '}).call(' + (thisValue ? '_g._this' : 'this') + ', _g["' + g + '"]';
-        }
-        else {
-          globalPrefix += ', ' + g;
-          globalSuffix += ', _g["' + g + '"]';
-        }
-      }
-      if (globalPrefix) {
-        globalPrefix += '){';
-        globalSuffix += ');';
-      }
-      if (thisValue)
-        __global._g._this = thisValue;
-    }
+    return load.source
+        // adds the sourceURL comment if not already present
+        + (load.source.substr(lastLineIndex, 15) != '\n//# sourceURL=' 
+          ? '\n//# sourceURL=' + load.address + (load.metadata.sourceMap ? '!transpiled' : '') : '')
+        // add sourceMappingURL if load.metadata.sourceMap is set
+        + (load.metadata.sourceMap && hasBtoa && 
+          '\n//# sourceMappingURL=data:application/json;base64,' + btoa(unescape(encodeURIComponent(load.metadata.sourceMap))) || '')
+  }
 
-    return globalPrefix + load.source + globalSuffix
-        + (load.address ? '\n//# sourceURL=' + load.address : '')
-        + (sourceMappingURL ? '\n//# sourceMappingURL=' + sourceMappingURL : '');
+  // Web Worker and Chrome Extensions use original ESML eval
+  // this may lead to some global module execution differences (eg var not defining onto global)
+  if (isWorker || isBrowser && window.chrome && window.chrome.extension) {
+    __exec = function(load) {
+      try {
+        preExec(this);
+        new Function(getSource(load)).call(__global);
+        postExec();
+      }
+      catch(e) {
+        throw addToError(e, 'Evaluating ' + load.address);
+      }
+    };
   }
 
   // use script injection eval to get identical global script behaviour
-  if (typeof document != 'undefined') {
+  else if (typeof document != 'undefined') {
     var head;
 
     var scripts = document.getElementsByTagName('script');
     $__curScript = scripts[scripts.length - 1];
 
-    __exec = function(load, globals, thisValue) {
+    __exec = function(load) {
       if (!head)
         head = document.head || document.body || document.documentElement;
 
       var script = document.createElement('script');
-      script.text = getSource(load, globals, thisValue);
+      script.text = getSource(load);
       var onerror = window.onerror;
       var e;
       window.onerror = function(_e) {
@@ -1225,59 +1212,33 @@ var __exec;
       head.appendChild(script);
       head.removeChild(script);
       postExec();
-      __global._g = undefined;
       window.onerror = onerror;
       if (e)
         throw e;
     }
   }
-  // Web Worker uses original ESML eval
-  // this may lead to some global module execution differences (eg var not defining onto global)
-  else if (isWorker) {
-    __exec = function(load, globals, thisValue) {
-      try {
-        preExec(this);
-        new Function(getSource(load, globals, thisValue)).call(__global);
-        postExec();
-        __global._g = undefined;
-      }
-      catch(e) {
-        throw addToError(e, 'Evaluating ' + load.address);
-      }
-    };
-  }
   else {
     // global scoped eval for node
     var vmModule = 'vm';
     var vm = require(vmModule);
-    __exec = function(load, globals, thisValue) {
+    __exec = function(load) {
       try {
         preExec(this);
-        vm.runInThisContext(getSource(load, globals, thisValue));
+        vm.runInThisContext(getSource(load));
         postExec();
-        __global._g = undefined;
       }
       catch(e) {
-        throw addToError(e, 'Evaluating ' + load.address);
+        throw addToError(e.toString(), 'Evaluating ' + load.address);
       }
     };
   }
 
-  hook('instantiate', function(instantiate) {
-    return function(load) {
-      load.metadata.deps = load.metadata.deps || [];
-      for (var g in load.metadata.globals)
-        load.metadata.deps.push(load.metadata.globals[g]);
-      return instantiate.call(this, load);
-    };
-  });
-
 })();// SystemJS Loader Class and Extension helpers
 
-function SystemJSLoader(options) {
-  SystemLoader.call(this, options);
+function SystemJSLoader() {
+  SystemLoader.call(this);
 
-  systemJSConstructor.call(this, options);
+  systemJSConstructor.call(this);
 }
 
 // inline Object.create-style class extension
@@ -1316,124 +1277,59 @@ function readMemberExpression(p, value) {
   return value;
 }
 
+var baseURLCache = {};
+function getBaseURLObj() {
+  if (baseURLCache[this.baseURL])
+    return baseURLCache[this.baseURL];
+
+  // normalize baseURL if not already
+  if (this.baseURL[this.baseURL.length - 1] != '/')
+    this.baseURL += '/';
+
+  var baseURL = new URL(this.baseURL, baseURI);
+
+  this.baseURL = baseURL.href;
+
+  return (baseURLCache[this.baseURL] = baseURL);
+}
+
+var baseURIObj = new URL(baseURI);
+
 (function() {
 
 hookConstructor(function(constructor) {
   return function() {
     constructor.call(this);
 
+    // support baseURL
+    this.baseURL = baseURI.substr(0, baseURI.lastIndexOf('/') + 1);
+
     // support the empty module, as a concept
     this.set('@empty', this.newModule({}));
   };
 });
 
-var baseURLCache = {};
-function normalizeBaseURL() {
-  // normalize baseURL if not already
-  this.baseURL = baseURLCache[this.baseURL] = baseURLCache[this.baseURL] || new URL(this.baseURL + (this.baseURL[this.baseURL.length - 1] != '/' ? '/' : ''), baseURI).href;
-}
-
 /*
   Normalization
 
-  There are two types of normalized module specifiers:
-  - Package names: PLAIN NAMES (not beginning with protocol://, /, ./)
-  - URLs: absolute URLs
+  If a name is relative, we apply URL normalization to the page
+  If a name is an absolute URL, we leave it as-is
 
-  All modules in the module table fall under one of the above.
+  Plain names (neither of the above) run through the map and package
+  normalization phases (applying before and after this one).
 
-  When normalizing a module, we need to either normalize it as a URL into
-  an absolute URL for the registry, or as a PLAIN NAME using Dot Normalization.
+  The paths normalization phase applies last (paths extension), which
+  defines the `normalizeSync` function and normalizes everything into
+  a URL.
 
-  - Dot Normalization is applied when the relative module name starts with
-    ./ or ../ and the parent module name is not a URL.
-    Dot Normalization is a subset of URL normalization handling relative 
-    resolution and backtracking relative to a plain parent name.
-    ( normalize(../x, a/b/c) -> a/x )
-    Inner ../ or ./ are not supported.
-    Names that dot below the parent name become the base-level.
-
-  - URL Normalization is applied when the relative name to normalize starts with
-    ./ or ../ and the parent name is a URL, or when it starts with / or //.
-
-  When there is no parent name, the parent name is taken to be the baseURL.
-
-  Plain Names (as defined above) are left in-tact.
+  The final normalization 
  */
 hook('normalize', function() {
-  return function(name, parentName, parentAddress) {
-    normalizeBaseURL.call(this);
-
-    // Relative Normalization
-    if (name[0] == '.' && parentName) {
-      // if parent is a URL, apply URL normalization
-      if (parentName.match(absURLRegEx))
-        return new URL(name, parentName).href;
-
-      // Dot Normalization
-
-      // skip leading ./
-      var parts = name.split('/');
-      var i = 0;
-      var dotdots = 0;
-      while (parts[i] == '.') {
-        i++;
-        if (i == parts.length)
-          throw new TypeError('Invalid module name');
-      }
-      
-      // count dot dots
-      while (parts[i] == '..') {
-        i++;
-        dotdots++;
-        if (i == parts.length)
-          throw new TypeError('Invalid module name');
-      }
-
-      var parentParts = parentName.split('/');
-
-      parts = parts.splice(i, parts.length - i);
-
-      // if backtracking below the parent name, just set to the base-level like URLs
-      // NB if parentAddress is supported in the spec, we can URL normalize against it here instead
-      if (dotdots > parentParts.length)
-        throw new TypeError('Normalization of "' + name + '" to "' + parentName + '" back-tracks below the parent');
-
-      parts = parentParts.splice(0, parentParts.length - dotdots - 1).concat(parts);
-
-      name = parts.join('/');
-    }
-    
-    // if url-relative, normalize to baseURL
+  return function(name, parentName) {
+    // relative URL-normalization
     if (name[0] == '.' || name[0] == '/')
-      name = new URL(name, this.baseURL).href;
-
+      return new URL(name, parentName || baseURIObj).href;
     return name;
-  };
-});
-
-
-/*
-  Locate
-
-  - URLs are left as-is
-  - PLAIN NAMES (not URLs) are checked against paths.
-    (Paths is moved from normalize in the module spec to locate in the System spec.
-     This isn't inconsistent because the module spec normalizes everything to absolute URLs,
-     while the System spec defines its own intermediate union of URLs and plain paths)
-  - The resulting name (if matched in paths or not) is then normalized to the baseURL
-  - Breaking Change in future: This final normalization will ultimately only apply for 
-    relative syntax and not for plain names
-    That is, System.import('jquery') must be configured, and won't default to baseURL
-      System.import('./jquery') should be used instead, making plain and URL spaces
-      separate and distinct.
- */
-hook('locate', function() {
-  return function(load) {
-    if (load.name.match(absURLRegEx))
-      return load.name;
-
-    return new URL(applyPaths(this, load.name), this.baseURL).href;
   };
 });
 
@@ -1493,20 +1389,134 @@ hook('import', function(systemImport) {
   For easy normalization canonicalization with latest URL support.
 
 */
-SystemLoader.prototype.config = function(cfg) {
-  normalizeBaseURL.call(this);
+SystemJSLoader.prototype.config = function(cfg) {
+
+  // always configure baseURL first
+  if (cfg.baseURL) {
+    var hasConfig = false;
+    function checkHasConfig(obj) {
+      for (var p in obj)
+        return true;
+    }
+    if (checkHasConfig(this.packages) || checkHasConfig(this.meta) || checkHasConfig(this.depCache) || checkHasConfig(this.bundles))
+      throw new TypeError('baseURL should only be configured once and must be configured first.');
+
+    this.baseURL = cfg.baseURL;
+
+    // sanitize baseURL
+    getBaseURLObj.call(this);
+  }
+
+  if (cfg.paths) {
+    for (var p in cfg.paths)
+      this.paths[p] = cfg.paths[p];
+  }
+
+  if (cfg.map) {
+    for (var p in cfg.map) {
+      var v = cfg.map[p];
+
+      // object map backwards-compat into packages configuration
+      if (typeof v !== 'string') {
+        var normalized = this.normalizeSync(p);
+
+        // if doing default js extensions, undo to get package name
+        if (this.defaultJSExtensions && p.substr(p.length - 3, 3) != '.js')
+          normalized = normalized.substr(0, normalized.length - 3);
+
+        // if a package main, revert it
+        var pkgMatch = '';
+        for (var pkg in this.packages) {
+          if (normalized.substr(0, pkg.length) == pkg 
+              && (!normalized[pkg.length] || normalized[pkg.length] == '/') 
+              && pkgMatch.split('/').length < pkg.split('/').length)
+            pkgMatch = pkg;
+        }
+        if (pkgMatch && this.packages[pkgMatch].main)
+          normalized = normalized.substr(0, normalized.length - this.packages[pkgMatch].main.length - 1);
+
+        var pkg = this.packages[normalized] = this.packages[normalized] || {};
+        pkg.map = v;
+      }
+      else {
+        this.map[p] = v;
+      }
+    }
+  }
+
+  if (cfg.packages) {
+    for (var p in cfg.packages) {
+      var prop = this.normalizeSync(p);
+
+      // if doing default js extensions, undo to get package name
+      if (this.defaultJSExtensions && p.substr(p.length - 3, 3) != '.js')
+        prop = prop.substr(0, prop.length - 3);
+
+      this.packages[prop]= this.packages[prop] || {};
+      for (var q in cfg.packages[p])
+        this.packages[prop][q] = cfg.packages[p][q];
+    }
+  }
+
+  if (cfg.bundles) {
+    for (var p in cfg.bundles) {
+      var bundle = [];
+      for (var i = 0; i < cfg.bundles[p].length; i++)
+        bundle.push(this.normalizeSync(cfg.bundles[p][i]));
+      this.bundles[p] = bundle;
+    }
+  }
+
   for (var c in cfg) {
     var v = cfg[c];
-    var normalizeConfig = false;
-    if (typeof v == 'object' && !(v instanceof Array)) {
-      this[c] = this[c] || {};
-      if (c == 'packages' || c == 'meta')
-        normalizeConfig = true;
-      for (var p in v)
-        this[c][this.normalizeSync(p)] = v[p];
-    }
-    else
+    var normalizeProp = false, normalizeValArray = false;
+
+    if (c == 'baseURL' || c == 'map' || c == 'packages' || c == 'bundles' || c == 'paths')
+      continue;
+
+    if (typeof v != 'object' || v instanceof Array) {
       this[c] = v;
+    }
+    else {
+      this[c] = this[c] || {};
+
+      if (c == 'meta' || c == 'depCache')
+        normalizeProp = true;
+
+      for (var p in v) {
+        if (normalizeProp)
+          this[c][this.normalizeSync(p)] = v[p];
+        else
+          this[c][p] = v[p];
+      }
+    }
+
+    // optional global scoping
+    var globalPrefix = '';
+    var globalSuffix = '';
+    if (globals) {
+      __global._g = globals;
+      for (var g in globals) {
+        if (!globalPrefix) {
+          globalPrefix = '(function(' + g;
+          globalSuffix = '}).call(' + (thisValue ? '_g._this' : 'this') + ', _g["' + g + '"]';
+        }
+        else {
+          globalPrefix += ', ' + g;
+          globalSuffix += ', _g["' + g + '"]';
+        }
+      }
+      if (globalPrefix) {
+        globalPrefix += '){';
+        globalSuffix += ');';
+      }
+      if (thisValue)
+        __global._g._this = thisValue;
+    }
+
+    return globalPrefix + load.source + globalSuffix
+        + (load.address ? '\n//# sourceURL=' + load.address : '')
+        + (sourceMappingURL ? '\n//# sourceMappingURL=' + sourceMappingURL : '');
   }
 };
 
@@ -1645,6 +1655,7 @@ SystemLoader.prototype.config = function(cfg) {
 
     // named register
     if (name) {
+      name = loader.normalizeSync(name);
       register.name = name;
       if (!(name in loader.defined))
         loader.defined[name] = register; 
@@ -1742,7 +1753,7 @@ SystemLoader.prototype.config = function(cfg) {
         load.metadata.entry = anonRegister;
       
       if (calledRegister) {
-        load.metadata.format = load.metadata.format || 'register';
+        load.metadata.format = load.metadata.format || 'defined';
         load.metadata.registered = true;
         calledRegister = false;
         anonRegister = null;
@@ -1838,7 +1849,14 @@ SystemLoader.prototype.config = function(cfg) {
 
     var declaration = entry.declare.call(__global, function(name, value) {
       module.locked = true;
-      exports[name] = value;
+
+      if (typeof name == 'object') {
+        for (var p in name)
+          exports[p] = name[p];
+      }
+      else {
+        exports[name] = value;
+      }
 
       for (var i = 0, l = module.importers.length; i < l; i++) {
         var importerModule = module.importers[i];
@@ -1975,7 +1993,9 @@ SystemLoader.prototype.config = function(cfg) {
           entry.esModule[p] = exports[p];
       }
       entry.esModule['default'] = exports;
-      entry.esModule.__useDefault = true;
+      defineProperty(entry.esModule, '__useDefault', {
+        value: true
+      });
     }
   }
 
@@ -2040,6 +2060,9 @@ SystemLoader.prototype.config = function(cfg) {
       
       if (load.metadata.format == 'register')
         load.metadata.scriptLoad = true;
+
+      // NB remove when "deps " is deprecated
+      load.metadata.deps = load.metadata.deps || [];
       
       return fetch.call(this, load);
     };
@@ -2109,7 +2132,8 @@ SystemLoader.prototype.config = function(cfg) {
 
       // named bundles are just an empty module
       if (!entry)
-        return {
+        entry = {
+          declarative: false,
           deps: load.metadata.deps,
           execute: function() {
             return loader.newModule({});
@@ -2117,12 +2141,7 @@ SystemLoader.prototype.config = function(cfg) {
         };
 
       // place this module onto defined for circular references
-      if (entry)
-        loader.defined[load.name] = entry;
-
-      // no entry -> treat as ES6
-      else
-        return instantiate.call(loader, load);
+      loader.defined[load.name] = entry;
 
       entry.deps = dedupe(entry.deps);
       entry.name = load.name;
@@ -2158,39 +2177,6 @@ SystemLoader.prototype.config = function(cfg) {
   });
 })();
 /*
- * Set transpiler paths in Node
- */
-(function() {
-  var nodeResolver = typeof process != 'undefined' && typeof require != 'undefined' && require.resolve;
-
-  function configNodePath(loader, module, nodeModule, wildcard) {
-    if (loader.paths[module])
-      return;
-
-    var ext = wildcard ? '/package.json' : '';
-    try {
-      var match = nodeResolver(nodeModule + ext);
-    }
-    catch(e) {}
-    
-    if (match)
-      loader.paths[module] = 'file://' + (isWindows ? '/' : '') + match.substr(0, match.length - ext.length) + (wildcard ? '/*.js' : '');
-  }
-
-  hookConstructor(function(constructor) {
-    return function() {
-      constructor.call(this);
-
-      if (nodeResolver) {
-        configNodePath(this, 'traceur', 'traceur/bin/traceur.js');
-        configNodePath(this, 'traceur-runtime', 'traceur/bin/traceur-runtime.js');
-        configNodePath(this, 'babel', 'babel-core/browser.js');
-        configNodePath(this, 'babel/external-helpers', 'babel-core/external-helpers.js');
-        configNodePath(this, 'babel-runtime/*', 'babel-runtime', true);
-      }
-    };
-  });
-})();/*
  * Extension to detect ES6 and auto-load Traceur or Babel for processing
  */
 (function() {
@@ -2200,25 +2186,6 @@ SystemLoader.prototype.config = function(cfg) {
   var traceurRuntimeRegEx = /\$traceurRuntime\s*\./;
   var babelHelpersRegEx = /babelHelpers\s*\./;
 
-  function setMetaGlobal(loader, name) {
-    var meta = loader.meta[name] = loader.meta[name] || {};
-    meta.format = meta.format || 'global';
-    if (name === 'traceur')
-      meta.exports = 'traceur';
-  }
-
-  hookConstructor(function(constructor) {
-    return function() {
-      constructor.call(this);
-
-      setMetaGlobal(this, 'babel');
-      setMetaGlobal(this, 'traceur');
-      setMetaGlobal(this, 'traceur-runtime');
-      setMetaGlobal(this, 'babel/external-helpers.js');
-      setMetaGlobal(this, 'typescript/bin/typescript.js');
-    };
-  });
-
   hook('translate', function(translate) {
     return function(load) {
       var loader = this;
@@ -2226,17 +2193,59 @@ SystemLoader.prototype.config = function(cfg) {
       .then(function(source) {
         // detect & transpile ES6
         if (load.metadata.format == 'esm' || load.metadata.format == 'es6' || !load.metadata.format && source.match(esmRegEx)) {
-          load.metadata.format = 'esm';          
-          return transpile.call(loader, load);
+          load.metadata.format = 'esm';
+
+          // setting _loadedTranspiler = false tells the next block to
+          // do checks for setting transpiler metadata
+          loader._loadedTranspiler = loader._loadedTranspiler || false;
+          if (loader.pluginLoader)
+            loader.pluginLoader._loadedTranspiler = loader._loadedTranspiler || false;
+
+          // defined in es6-module-loader/src/transpile.js
+          return transpile.call(loader, load)
+          .then(function(source) {
+            // clear sourceMap as transpiler embeds it
+            load.metadata.sourceMap = undefined;
+            return source;
+          });
         }
 
-        if (load.metadata.format == 'register') {
+        // load the transpiler correctly
+        if (loader._loadedTranspiler === false && load.name == loader.normalizeSync(loader.transpiler)) {
+          // always load transpiler as a global
+          if (source.length > 100) {
+            load.metadata.format = load.metadata.format || 'global';
+
+            if (loader.transpiler === 'traceur')
+              load.metadata.exports = 'traceur';
+            if (loader.transpiler === 'typescript')
+              load.metadata.exports = 'ts';
+          }
+
+          loader._loadedTranspiler = true;
+        }
+
+        // load the transpiler runtime correctly
+        if (loader._loadedTranspilerRuntime === false) {
+          if (load.name == loader.normalizeSync('traceur-runtime')
+              || load.name == loader.normalizeSync('babel/external-helpers*')) {
+            if (source.length > 100)
+              load.metadata.format = load.metadata.format || 'global';
+
+            loader._loadedTranspilerRuntime = true;
+          }
+        }
+
+        // detect transpiler runtime usage to load runtimes
+        if (load.metadata.format == 'register' && loader._loadedTranspilerRuntime !== true) {
           if (!__global.$traceurRuntime && load.source.match(traceurRuntimeRegEx)) {
+            loader._loadedTranspilerRuntime = loader._loadedTranspilerRuntime || false;
             return loader['import']('traceur-runtime').then(function() {
               return source;
             });
           }
           if (!__global.babelHelpers && load.source.match(babelHelpersRegEx)) {
+            loader._loadedTranspilerRuntime = loader._loadedTranspilerRuntime || false;
             return loader['import']('babel/external-helpers').then(function() {
               return source;
             });
@@ -2259,96 +2268,92 @@ SystemLoader.prototype.config = function(cfg) {
 
   Without metadata.exports, detects writes to the global object.
 */
-(function() {
+var __globalName = typeof self != 'undefined' ? 'self' : 'global';
 
-  var __globalName = typeof self != 'undefined' ? 'self' : 'global';
-
-  hook('onScriptLoad', function(onScriptLoad) {
-    return function(load) {
-      if (load.metadata.format == 'global') {
-        load.metadata.registered = true;
-        var globalValue = readMemberExpression(load.metadata.exports, __global);
-        load.metadata.execute = function() {
-          return globalValue;
-        }
+hook('onScriptLoad', function(onScriptLoad) {
+  return function(load) {
+    if (load.metadata.format == 'global') {
+      load.metadata.registered = true;
+      var globalValue = readMemberExpression(load.metadata.exports, __global);
+      load.metadata.execute = function() {
+        return globalValue;
       }
-      return onScriptLoad.call(this, load);
-    };
-  });
+    }
+    return onScriptLoad.call(this, load);
+  };
+});
 
-  hook('fetch', function(fetch) {
-    return function(load) {
-      if (load.metadata.exports)
-        load.metadata.format = 'global';
+hook('fetch', function(fetch) {
+  return function(load) {
+    if (load.metadata.exports)
+      load.metadata.format = 'global';
 
-      // A global with exports, no globals and no deps
-      // can be loaded via a script tag
-      if (load.metadata.format == 'global' 
-          && load.metadata.exports && !load.metadata.globals 
-          && (!load.metadata.deps || load.metadata.deps.length == 0))
-        load.metadata.scriptLoad = true;
+    // A global with exports, no globals and no deps
+    // can be loaded via a script tag
+    if (load.metadata.format == 'global' 
+        && load.metadata.exports && !load.metadata.globals 
+        && (!load.metadata.deps || load.metadata.deps.length == 0))
+      load.metadata.scriptLoad = true;
 
-      return fetch.call(this, load);
-    };
-  });
+    return fetch.call(this, load);
+  };
+});
 
-  // ideally we could support script loading for globals, but the issue with that is that
-  // we can't do it with AMD support side-by-side since AMD support means defining the
-  // global define, and global support means not definining it, yet we don't have any hook
-  // into the "pre-execution" phase of a script tag being loaded to handle both cases
+// ideally we could support script loading for globals, but the issue with that is that
+// we can't do it with AMD support side-by-side since AMD support means defining the
+// global define, and global support means not definining it, yet we don't have any hook
+// into the "pre-execution" phase of a script tag being loaded to handle both cases
 
-  hook('instantiate', function(instantiate) {
-    return function(load) {
-      var loader = this;
 
-      if (!load.metadata.format)
-        load.metadata.format = 'global';
+hook('instantiate', function(instantiate) {
+  return function(load) {
+    var loader = this;
+    constructor.call(loader);
 
-      // add globals as dependencies
-      if (load.metadata.globals)
-        for (var g in load.metadata.globals)
-          load.metadata.deps.push(load.metadata.globals[g]);
+    if (!load.metadata.format)
+      load.metadata.format = 'global';
 
-      // global is a fallback module format
-      if (load.metadata.format == 'global' && !load.metadata.registered) {
-        load.metadata.execute = function(require, exports, module) {
-          var exportName = load.metadata.exports;
+    // add globals as dependencies
+    if (load.metadata.globals)
+      for (var g in load.metadata.globals)
+        load.metadata.deps.push(load.metadata.globals[g]);
 
-          if (!exportName)
-            loader.get('@@global-helpers').prepareGlobal(module.id);
-          else
-            load.source += '\n' + __globalName + '["' + exportName + '"] = ' + exportName + ';';
+    // global is a fallback module format
+    if (load.metadata.format == 'global' && !load.metadata.registered) {
+      load.metadata.execute = function(require, exports, module) {
 
-          // disable module detection
-          var define = __global.define;
-          var cRequire = __global.require;
-          
-          __global.define = undefined;
-          __global.module = undefined;
-          __global.exports = undefined;
-
-          // allow globals to be defined by other modules (including non globals)
-          if (load.metadata.globals) {
-            var globals = {};
-            for (var g in load.metadata.globals)
-              globals[g] = require(load.metadata.globals[g]);
-          }
-
-          __exec.call(loader, load, globals);
-
-          __global.require = cRequire;
-          __global.define = define;
-
-          if (exportName)
-            return readMemberExpression(exportName, __global);
-          else
-            return loader.get('@@global-helpers').retrieveGlobal(module.id);
+        var globals;
+        if (load.metadata.globals) {
+          globals = {};
+          for (var g in load.metadata.globals)
+            globals[g] = require(load.metadata.globals[g]);
         }
+        
+        var exportName = load.metadata.exports;
+        var retrieveGlobal = loader.get('@@global-helpers').prepareGlobal(module.id, exportName, globals);
+
+        if (exportName)
+          load.source += '\n' + __globalName + '["' + exportName + '"] = ' + exportName + ';';
+
+        // disable module detection
+        var define = __global.define;
+        var cRequire = __global.require;
+        
+        __global.define = undefined;
+        __global.module = undefined;
+        __global.exports = undefined;
+
+        __exec.call(loader, load);
+
+        __global.require = cRequire;
+        __global.define = define;
+
+        return retrieveGlobal();
       }
-      return instantiate.call(this, load);
-    };
-  });
-})();
+    }
+    return instantiate.call(this, load);
+  };
+});
 hookConstructor(function(constructor) {
   return function() {
     var loader = this;
@@ -2387,36 +2392,64 @@ hookConstructor(function(constructor) {
     }
 
     loader.set('@@global-helpers', loader.newModule({
-      prepareGlobal: function(moduleName) {
+      prepareGlobal: function(moduleName, exportName, globals) {
+        // set globals
+        var oldGlobals;
+        if (globals) {
+          oldGlobals = {};
+          for (var g in globals) {
+            oldGlobals[g] = globals[g];
+            __global[g] = globals[g];
+          }
+        }
+
         // store a complete copy of the global object in order to detect changes
-        globalSnapshot = {};
+        if (!exportName) {
+          globalSnapshot = {};
 
-        forEachGlobalValue(function(name, value) {
-          globalSnapshot[name] = value;
-        });
-      },
-      retrieveGlobal: function(moduleName) {
-        var singleGlobal;
-        var multipleExports;
-        var exports = {};
+          forEachGlobalValue(function(name, value) {
+            globalSnapshot[name] = value;
+          });
+        }
 
-        forEachGlobalValue(function(name, value) {
-          if (globalSnapshot[name] === value)
-            return;
-          if (typeof value == 'undefined')
-            return;
-          exports[name] = value;
+        // return function to retrieve global
+        return function() {
+          var globalValue;
 
-          if (typeof singleGlobal != 'undefined') {
-            if (!multipleExports && singleGlobal !== value)
-              multipleExports = true;
+          if (exportName) {
+            globalValue = readMemberExpression(exportName, __global);
           }
           else {
-            singleGlobal = value;
-          }
-        });
+            var singleGlobal;
+            var multipleExports;
+            var exports = {};
 
-        return multipleExports ? exports : singleGlobal;
+            forEachGlobalValue(function(name, value) {
+              if (globalSnapshot[name] === value)
+                return;
+              if (typeof value == 'undefined')
+                return;
+              exports[name] = value;
+
+              if (typeof singleGlobal != 'undefined') {
+                if (!multipleExports && singleGlobal !== value)
+                  multipleExports = true;
+              }
+              else {
+                singleGlobal = value;
+              }
+            });
+            globalValue = multipleExports ? exports : singleGlobal;
+          }
+
+          // revert globals
+          if (oldGlobals) {
+            for (var g in oldGlobals)
+              __global[g] = oldGlobals[g];
+          }
+
+          return globalValue;
+        };
       }
     }));
   };
@@ -2448,7 +2481,7 @@ hookConstructor(function(constructor) {
     return deps;
   }
 
-  if (typeof window != 'undefined' && window.location)
+  if (typeof window != 'undefined' && typeof document != 'undefined' && window.location)
     var windowOrigin = location.protocol + '//' + location.hostname + (location.port ? ':' + location.port : '');
 
   hookConstructor(function(constructor) {
@@ -2492,30 +2525,32 @@ hookConstructor(function(constructor) {
             dirname = dirname.substr(windowOrigin.length);
           }
           else if (address.substr(0, 8) == 'file:///') {
-            address = address.substr(8);
-            dirname = dirname.substr(8);
-          }
+            address = address.substr(7);
+            dirname = dirname.substr(7);
 
-          var globals = {
-            exports: exports,
-            module: module,
-            require: require,
-            __filename: address,
-            __dirname: dirname,
-            global: __global
-          };
-          for (var g in load.metadata.globals)
-            globals[g] = require(load.metadata.globals[g]);
+            // on windows remove leading '/'
+            if (isWindows) {
+              address = address.substr(1);
+              dirname = dirname.substr(1);
+            }
+          }
 
           // disable AMD detection
           var define = __global.define;
           __global.define = undefined;
 
-          __exec.call(loader, load, globals, exports);
+          __global.__cjsWrapper = {
+            exports: exports,
+            args: [require, exports, module, address, dirname, __global]
+          };
 
+          load.source = "(function(require, exports, module, __filename, __dirname, global) {"
+              + load.source + "\n}).apply(__cjsWrapper.exports, __cjsWrapper.args);";
+
+          __exec.call(loader, load);
+
+          __global.__cjsWrapper = undefined;
           __global.define = define;
-
-          __global._g = undefined;
         };
       }
 
@@ -2644,7 +2679,7 @@ hookConstructor(function(constructor) {
           for (var i = 0; i < deps.length; i++)
             depValues.push(req(deps[i]));
 
-          module.uri = loader.baseURL + module.id;
+          module.uri = module.id;
 
           module.config = function() {};
 
@@ -2655,12 +2690,22 @@ hookConstructor(function(constructor) {
           if (exportsIndex != -1)
             depValues.splice(exportsIndex, 0, exports);
           
-          if (requireIndex != -1) 
-            depValues.splice(requireIndex, 0, function(names, callback, errback) {
+          if (requireIndex != -1) {
+            function contextualRequire(names, callback, errback) {
               if (typeof names == 'string' && typeof callback != 'function')
                 return req(names);
               return require.call(loader, names, callback, errback, module.id);
-            });
+            }
+            contextualRequire.toUrl = function(name) {
+              // normalize without defaultJSExtensions
+              var defaultJSExtension = loader.defaultJSExtensions && name.substr(name.length - 3, 3) != '.js';
+              var url = loader.normalizeSync(name, module.id);
+              if (defaultJSExtension && url.substr(url.length - 3, 3) == '.js')
+                url = url.substr(0, url.length - 3);
+              return url;
+            };
+            depValues.splice(requireIndex, 0, contextualRequire);
+          }
 
           // set global require to AMD require
           var curRequire = __global.require;
@@ -2856,13 +2901,6 @@ hook('normalize', function(normalize) {
 
       // now do the global map
       for (var p in this.map) {
-        if (typeof this.map[p] != 'string') {
-          var pkg = this.packages[p] = this.packages[p] || {};
-          pkg.map = this.map[p];
-          delete this.map[p];
-          continue;
-        }
-
         if (name.substr(0, p.length) == p && (name.length == p.length || name[p.length] == '/')) {
           var curMatchLength = p.split('/').length;
           if (curMatchLength <= bestMatchLength)
@@ -2880,6 +2918,41 @@ hook('normalize', function(normalize) {
   };
 });
 /*
+ * Paths extension
+ * 
+ * Applies paths and normalizes to a full URL
+ */
+hook('normalize', function(normalize) {
+
+  return function(name, parentName) {
+    var normalized = normalize.call(this, name, parentName);
+
+    // if the module is in the registry already, use that
+    if (this.has(normalized))
+      return normalized;
+
+    if (normalized.match(absURLRegEx)) {
+      // defaultJSExtensions backwards compatibility
+      if (this.defaultJSExtensions && normalized.substr(normalized.length - 3, 3) != '.js')
+        normalized += '.js';
+      return normalized;
+    }
+
+    // applyPaths implementation provided from ModuleLoader system.js source
+    normalized = applyPaths(this.paths, normalized) || normalized;
+
+    // defaultJSExtensions backwards compatibility
+    if (this.defaultJSExtensions && normalized.substr(normalized.length - 3, 3) != '.js')
+      normalized += '.js';
+
+    // ./x, /x -> page-relative
+    if (normalized[0] == '.' || normalized[0] == '/')
+      return new URL(normalized, baseURIObj).href;
+    // x -> baseURL-relative
+    else
+      return new URL(normalized, getBaseURLObj.call(this)).href;
+  };
+});/*
  * Package Configuration Extension
  *
  * Example:
@@ -2900,12 +2973,17 @@ hook('normalize', function(normalize) {
  *     map: {
  *        // map internal require('sizzle') to local require('./vendor/sizzle')
  *        sizzle: './vendor/sizzle.js',
- *
  *        // map any internal or external require of 'jquery/vendor/another' to 'another/index.js'
- *        './vendor/another': 'another/index.js'
- *      }
- *    }
- *  }
+ *        './vendor/another.js': './another/index.js',
+ *        // test.js / test -> lib/test.js
+ *        './test.js': './lib/test.js',
+ *     },
+ *     env: {
+ *       'browser': {
+ *         main: 'browser.js'
+ *       }
+ *     }
+ *   }
  * };
  *
  * Then:
@@ -2918,9 +2996,9 @@ hook('normalize', function(normalize) {
  * - main is the only property where a leading "./" can be added optionally
  * - map and defaultExtension are applied to the main
  * - defaultExtension adds the extension only if no other extension is present
- * - if a map or meta value is available for a module without defaultExtension, defaultExtension is skipped
+ * - defaultJSExtensions applies after map when defaultExtension is not set
+ * - if a meta value is available for a module, map and defaultExtension are skipped
  * - like global map, package map also applies to subpaths (sizzle/x, ./vendor/another/sub)
- * - map targets do not pass through any further map or defaultExtension
  *
  * In addition, the following meta properties will be allowed to be package
  * -relative as well in the package meta config:
@@ -2945,6 +3023,43 @@ hook('normalize', function(normalize) {
     }
   }
 
+  function getPackageConfig(loader, pkgName) {
+    var pkgConfig = loader.packages[pkgName];
+
+    if (!pkgConfig.env)
+      return Promise.resolve(pkgConfig);
+
+    // check environment conditions
+    // default environment condition is '@env' in package or '@system-env' globally
+    return loader['import'](pkgConfig.map['@env'] || '@system-env', pkgName)
+    .then(function(env) {
+      // derived config object
+      var pkg = {};
+      for (var p in pkgConfig)
+        if (p !== 'map' & p !== 'env')
+          pkg[p] = pkgConfig[p];
+
+      pkg.map = {};
+      for (var p in pkgConfig.map)
+        pkg.map[p] = pkgConfig.map[p];
+
+      for (var e in pkgConfig.env) {
+        if (env[e]) {
+          var envConfig = pkgConfig.env[e];
+          if (envConfig.main)
+            pkg.main = envConfig.main;
+          for (var m in envConfig.map)
+            pkg.map[m] = envConfig.map[m];
+        }
+      }
+
+      // store the derived environment config so we have this cached for next time
+      loader.packages[pkgName] = pkg;
+
+      return pkg;
+    });
+  }
+
   function applyMap(map, name) {
     var bestMatch, bestMatchLength = 0;
     
@@ -2961,11 +3076,16 @@ hook('normalize', function(normalize) {
       return map[bestMatch] + name.substr(bestMatch.length);
   }
 
+  SystemJSLoader.prototype.normalizeSync = SystemJSLoader.prototype.normalize;
+
   hook('normalize', function(normalize) {
-    return function(name, parentName, parentAddress) {
+    return function(name, parentName) {
       // apply contextual package map first
-      if (parentName)
-        var parentPackage = getPackage.call(this, parentName);
+      if (parentName) {
+        var parentPackage = getPackage.call(this, parentName) || 
+            this.defaultJSExtensions && parentName.substr(parentName.length - 3, 3) == '.js' && 
+            getPackage.call(this, parentName.substr(0, parentName.length - 3));
+      }
 
       if (parentPackage && name[0] !== '.') {
         var parentMap = this.packages[parentPackage].map;
@@ -2974,45 +3094,69 @@ hook('normalize', function(normalize) {
 
           // relative maps are package-relative
           if (name[0] === '.')
-            parentName = parentPackage;
+            parentName = parentPackage + '/';
         }
       }
 
+      var defaultJSExtension = this.defaultJSExtensions && name.substr(name.length - 3, 3) != '.js';
+
       // apply global map, relative normalization
-      var normalized = normalize.call(this, name, parentName, parentAddress);
+      var normalized = normalize.call(this, name, parentName);
+
+      // undo defaultJSExtension
+      if (normalized.substr(normalized.length - 3, 3) != '.js')
+        defaultJSExtension = false;
+      if (defaultJSExtension)
+        normalized = normalized.substr(0, normalized.length - 3);
 
       // check if we are inside a package
       var pkgName = getPackage.call(this, normalized);
 
       if (pkgName) {
-        var pkg = this.packages[pkgName];
+        return getPackageConfig(this, pkgName)
+        .then(function(pkg) {
+          // main
+          if (pkgName === normalized && pkg.main)
+            normalized += '/' + (pkg.main.substr(0, 2) == './' ? pkg.main.substr(2) : pkg.main);
 
-        // main
-        if (pkgName === normalized && pkg.main)
-          normalized += '/' + (pkg.main.substr(0, 2) == './' ? pkg.main.substr(2) : pkg.main);
+          if (normalized.substr(pkgName.length) == '/')
+            return normalized;
+
+          // defaultExtension & defaultJSExtension
+          // if we have meta for this package, don't do defaultExtensions
+          var defaultExtension = '';
+          if (!pkg.meta || !pkg.meta[normalized.substr(pkgName.length + 1)]) {
+            // apply defaultExtension
+            if (pkg.defaultExtension) {
+              if (normalized.split('/').pop().indexOf('.') == -1)
+                defaultExtension = '.' + pkg.defaultExtension;
+            }
+            // apply defaultJSExtensions if defaultExtension not set
+            else if (defaultJSExtension) {
+              defaultExtension = '.js';
+            }
+          }
+
+          // apply submap checking without then with defaultExtension
+          var subPath = '.' + normalized.substr(pkgName.length);
+          var mapped = applyMap(pkg.map, subPath) || defaultExtension && applyMap(pkg.map, subPath + defaultExtension);
+          if (mapped)
+            normalized = mapped.substr(0, 2) == './' ? pkgName + mapped.substr(1) : mapped;
+          else
+            normalized += defaultExtension;
 
 
-        if (pkg.defaultExtension && normalized.split('/').pop().indexOf('.') == -1)
-          var defaultExtension = '.' + pkg.defaultExtension;
-
-        // apply map checking without then with defaultExtension
-        var subPath = '.' + normalized.substr(pkgName.length);
-        var mapped = applyMap(pkg.map, subPath) || defaultExtension && applyMap(pkg.map, subPath + defaultExtension);
-        if (mapped)
-          normalized = mapped.substr(0, 2) == './' ? pkgName + mapped.substr(1) : mapped;
-
-        // apply default extension if not in meta
-        else if (defaultExtension && (!pkg.meta || !pkg.meta[subPath.substr(2)]))
-          normalized += defaultExtension;
+          return normalized;
+        });
       }
+      
+      // add back defaultJSExtension if not a package
+      if (defaultJSExtension)
+        normalized += '.js';
 
       return normalized;
     };
   });
-
-  // we now have the complete normalize algorithm
-  // this is also the last point normalize is sync
-  SystemJSLoader.prototype.normalizeSync = SystemJSLoader.prototype.normalize;
 
   hook('locate', function(locate) {
     return function(load) {
@@ -3037,7 +3181,7 @@ hook('normalize', function(normalize) {
             var bestDepth = 0;
             var wildcardIndex;
             for (var module in pkg.meta) {
-              wildcardIndex = indexOf.call(module, '*');
+              wildcardIndex = module.indexOf('*');
               if (wildcardIndex === -1)
                 continue;
               if (module.substr(0, wildcardIndex) === load.name.substr(0, wildcardIndex)
@@ -3077,42 +3221,63 @@ hook('normalize', function(normalize) {
   for the plugin resource. See the plugin section of the systemjs readme.
 */
 (function() {
+
+  // sync or async plugin normalize function
+  function normalizePlugin(normalize, name, parentName, sync) {
+    var loader = this;
+    // if parent is a plugin, normalize against the parent plugin argument only
+    var parentPluginIndex;
+    if (parentName && (parentPluginIndex = parentName.indexOf('!')) != -1)
+      parentName = parentName.substr(0, parentPluginIndex);
+
+    // if this is a plugin, normalize the plugin name and the argument
+    var pluginIndex = name.lastIndexOf('!');
+    if (pluginIndex != -1) {
+      var argumentName = name.substr(0, pluginIndex);
+      var pluginName = name.substr(pluginIndex + 1) || argumentName.substr(argumentName.lastIndexOf('.') + 1);
+
+      // note if normalize will add a default js extension
+      // if so, remove for backwards compat
+      // this is strange and sucks, but will be deprecated
+      var defaultExtension = loader.defaultJSExtensions && argumentName.substr(argumentName.length - 3, 3) != '.js';
+
+      if (sync) {
+        argumentName = loader.normalizeSync(argumentName, parentName);
+        pluginName = loader.normalizeSync(pluginName, parentName);
+
+        if (defaultExtension && argumentName.substr(argumentName.length - 3, 3) == '.js')
+          argumentName = argumentName.substr(0, argumentName.length - 3);
+
+        return argumentName + '!' + pluginName;
+      }
+      else {
+        return Promise.all([
+          loader.normalize(argumentName, parentName),
+          loader.normalize(pluginName, parentName)
+        ])
+        .then(function(normalized) {
+          argumentName = normalized[0];
+          if (defaultExtension && argumentName.substr(argumentName.length - 3, 3) == '.js')
+            argumentName = argumentName.substr(0, argumentName.length - 3);
+          return argumentName + '!' + normalized[1];
+        });
+      }
+    }
+    else {
+      return normalize.call(loader, name, parentName);
+    }
+  }
+
+  // async plugin normalize
   hook('normalize', function(normalize) {
-    // plugin syntax normalization
-    return function(name, parentName, parentAddress) {
-      var loader = this;
-      // if parent is a plugin, normalize against the parent plugin argument only
-      var parentPluginIndex;
-      if (parentName && (parentPluginIndex = parentName.indexOf('!')) != -1)
-        parentName = parentName.substr(0, parentPluginIndex);
+    return function(name, parentName) {
+      return normalizePlugin.call(this, normalize, name, parentName, false);
+    };
+  });
 
-      return Promise.resolve(normalize.call(loader, name, parentName, parentAddress))
-      .then(function(name) {
-        // if this is a plugin, normalize the plugin name and the argument
-        var pluginIndex = name.lastIndexOf('!');
-        if (pluginIndex != -1) {
-          var argumentName = name.substr(0, pluginIndex);
-
-          // plugin name is part after "!" or the extension itself
-          var pluginName = name.substr(pluginIndex + 1) || argumentName.substr(argumentName.lastIndexOf('.') + 1);
-
-          // normalize the plugin name relative to the same parent
-          return new Promise(function(resolve) {
-            resolve(loader.normalize(pluginName, parentName, parentAddress)); 
-          })
-          // normalize the plugin argument
-          .then(function(_pluginName) {
-            pluginName = _pluginName;
-            return loader.normalize(argumentName, parentName, parentAddress);
-          })
-          .then(function(argumentName) {
-            return argumentName + '!' + pluginName;
-          });
-        }
-
-        // standard normalization
-        return name;
-      });
+  hook('normalizeSync', function(normalizeSync) {
+    return function(name, parentName) {
+      return normalizePlugin.call(this, normalizeSync, name, parentName, true);
     };
   });
 
@@ -3136,11 +3301,6 @@ hook('normalize', function(normalize) {
         if (!plugin)
           return address;
 
-        // NB to be deprecated
-        // backwards compat for strange plugin * paths
-        if (loader.paths['*'] == '*.js')
-          address = address.replace(/\.js$/, '');
-
         // only fetch the plugin itself if this name isn't defined
         if (loader.defined && loader.defined[name])
           return address;
@@ -3148,10 +3308,8 @@ hook('normalize', function(normalize) {
         var pluginLoader = loader.pluginLoader || loader;
 
         // load the plugin module and run standard locate
-        return pluginLoader.load(plugin)
-        .then(function() {
-          var loaderModule = pluginLoader.get(plugin);
-
+        return pluginLoader['import'](plugin)
+        .then(function(loaderModule) {
           // store the plugin module itself on the metadata
           load.metadata.loaderModule = loaderModule;
           load.metadata.loaderArgument = name;
@@ -3501,7 +3659,7 @@ hook('normalize', function(normalize) {
       var deps = loader.depCache[load.name];
       if (deps)
         for (var i = 0; i < deps.length; i++)
-          loader.load(deps[i]);
+          loader['import'](deps[i]);
 
       return locate.call(loader, load);
     };
@@ -3550,6 +3708,17 @@ hook('normalize', function(normalize) {
 
   var conditionalRegEx = /#\{[^\}]+\}|#\?.+$/;
 
+  hookConstructor(function(constructor) {
+    return function() {
+      constructor.call(this);
+
+      // standard environment module, starting small as backwards-compat matters!
+      this.set('@system-env', this.newModule({
+        browser: isBrowser
+      }));
+    };
+  });
+
   hook('normalize', function(normalize) {
     return function(name, parentName, parentAddress) {
       var loader = this;
@@ -3589,12 +3758,14 @@ hook('normalize', function(normalize) {
               conditionValue = !conditionValue;
             if (!conditionValue)
               name = '@empty';
+            else
+              name = name.replace(conditionalRegEx, '');
           }
           return normalize.call(loader, name, parentName, parentAddress);
         });
       }
 
-      return normalize.call(loader, name, parentName, parentAddress);
+      return Promise.resolve(normalize.call(loader, name, parentName, parentAddress));
     };
   });
 
@@ -3622,7 +3793,12 @@ System.constructor = SystemJSLoader;  // -- exporting --
 })(typeof self != 'undefined' ? self : global);}
 
 // auto-load Promise and URL polyfills if needed in the browser
-if (typeof Promise === 'undefined' || typeof URL === 'undefined') {
+try {
+  var hasURL = typeof URLPolyfill != 'undefined' || new URL('test:///').protocol == 'test:';
+}
+catch(e) {}
+
+if (typeof Promise === 'undefined' || !hasURL) {
   // document.write
   if (typeof document !== 'undefined') {
     var scripts = document.getElementsByTagName('script');

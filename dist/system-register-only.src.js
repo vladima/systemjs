@@ -1,5 +1,5 @@
 /*
- * SystemJS v0.16.11
+ * SystemJS v0.18.2
  */
 (function(__global) {
 
@@ -7,8 +7,8 @@
   var isBrowser = typeof window != 'undefined' && typeof document != 'undefined';
   var isWindows = typeof process != 'undefined' && !!process.platform.match(/^win/);
 
-  if (__global.console)
-    console.assert = console.assert || function() {};
+  if (!__global.console)
+    __global.console = { assert: function() {} };
 
   // IE8 support
   var indexOf = Array.prototype.indexOf || function(item) {
@@ -40,8 +40,15 @@
     var newErr;
     if (err instanceof Error) {
       var newErr = new Error(err.message, err.fileName, err.lineNumber);
-      newErr.message = err.message + '\n\t' + msg;
-      newErr.stack = err.stack;
+      if (isBrowser) {
+        newErr.message = err.message + '\n\t' + msg;
+        newErr.stack = err.stack;
+      }
+      else {
+        // node errors only look correct with the stack modified
+        newErr.message = err.message;
+        newErr.stack = err.stack + '\n\t' + msg;
+      }
     }
     else {
       newErr = err + '\n\t' + msg;
@@ -59,10 +66,7 @@
     }
   }
 
-  var URL = __global.URL || URLPolyfill;
-
   var baseURI;
-
   // environent baseURI detection
   if (typeof document != 'undefined' && document.getElementsByTagName) {
     baseURI = document.baseURI;
@@ -86,6 +90,14 @@
   }
   else {
     throw new TypeError('No environment baseURI');
+  }
+
+  var URL = __global.URL;
+  try {
+    new URL('test:///').protocol == 'test:';
+  }
+  catch(e) {
+    URL = URLPolyfill;
   }
 /*
 *********************************************************************************************
@@ -609,13 +621,13 @@ function logloads(loads) {
 
     if (load) {
       if (load && linkSet.loads[0].name != load.name)
-        exc = addToError(exc, 'Error loading "' + load.name + '" from "' + linkSet.loads[0].name + '" at ' + (linkSet.loads[0].address || '<unknown>'));
+        exc = addToError(exc, 'Error loading ' + load.name + ' from ' + linkSet.loads[0].name);
 
       if (load)
-        exc = addToError(exc, 'Error loading "' + load.name + '" at ' + (load.address || '<unknown>'));
+        exc = addToError(exc, 'Error loading ' + load.name);
     }
     else {
-      exc = addToError(exc, 'Error linking "' + linkSet.loads[0].name + '" at ' + (linkSet.loads[0].address || '<unknown>'));
+      exc = addToError(exc, 'Error linking ' + linkSet.loads[0].name);
     }
 
 
@@ -892,6 +904,10 @@ function logloads(loads) {
   }
 
   function doEnsureEvaluated() {}
+
+  function transpile() {
+    throw new TypeError('ES6 transpilation is only provided in the dev module loader build.');
+  }
 })();/*
 *********************************************************************************************
 
@@ -906,22 +922,18 @@ function logloads(loads) {
 
 var System;
 
-function SystemLoader(baseURL) {
+function SystemLoader() {
   Loader.call(this);
-
-  baseURL = baseURL || baseURI;
-
-  this.baseURL = baseURL;
   this.paths = {};
 }
 
 // NB no specification provided for System.paths, used ideas discussed in https://github.com/jorendorff/js-loaders/issues/25
-function applyPaths(loader, name) {
+function applyPaths(paths, name) {
   // most specific (most number of slashes in path) match wins
   var pathMatch = '', wildcard, maxSlashCount = 0;
 
   // check to see if we have a paths entry
-  for (var p in loader.paths) {
+  for (var p in paths) {
     var pathParts = p.split('*');
     if (pathParts.length > 2)
       throw new TypeError('Only one wildcard in a path is permitted');
@@ -946,7 +958,7 @@ function applyPaths(loader, name) {
     }
   }
 
-  var outPath = loader.paths[pathMatch] || name;
+  var outPath = paths[pathMatch] || name;
   if (wildcard)
     outPath = outPath.replace('*', wildcard);
 
@@ -957,12 +969,56 @@ function applyPaths(loader, name) {
 function LoaderProto() {}
 LoaderProto.prototype = Loader.prototype;
 SystemLoader.prototype = new LoaderProto();
-// SystemJS Loader Class and Extension helpers
+var absURLRegEx = /^([^\/]+:\/\/|\/)/;
 
-function SystemJSLoader(options) {
-  SystemLoader.call(this, options);
+// Normalization with module names as absolute URLs
+SystemLoader.prototype.normalize = function(name, parentName, parentAddress) {
+  // NB does `import 'file.js'` import relative to the parent name or baseURL?
+  //    have assumed that it is baseURL-relative here, but spec may well align with URLs to be the latter
+  //    safe option for users is to always use "./file.js" for relative
 
-  systemJSConstructor.call(this, options);
+  // not absolute or relative -> apply paths (what will be sites)
+  if (!name.match(absURLRegEx) && name[0] != '.')
+    name = new URL(applyPaths(this.paths, name), baseURI).href;
+  // apply parent-relative normalization, parentAddress is already normalized
+  else
+    name = new URL(name, parentName || baseURI).href;
+
+  return name;
+};
+
+SystemLoader.prototype.locate = function(load) {
+  return load.name;
+};
+
+
+// ensure the transpiler is loaded correctly
+SystemLoader.prototype.instantiate = function(load) {
+  var self = this;
+  return Promise.resolve(self.normalize(self.transpiler))
+  .then(function(transpilerNormalized) {
+    // load transpiler as a global (avoiding System clobbering)
+    if (load.address === transpilerNormalized) {
+      return {
+        deps: [],
+        execute: function() {
+          var curSystem = __global.System;
+          var curLoader = __global.Reflect.Loader;
+          // ensure not detected as CommonJS
+          __eval('(function(require,exports,module){' + load.source + '})();', load.address, __global);
+          __global.System = curSystem;
+          __global.Reflect.Loader = curLoader;
+          return self.newModule({ 'default': __global[self.transpiler], __useDefault: true });
+        }
+      };
+    }
+  });
+};// SystemJS Loader Class and Extension helpers
+
+function SystemJSLoader() {
+  SystemLoader.call(this);
+
+  systemJSConstructor.call(this);
 }
 
 // inline Object.create-style class extension
@@ -1098,7 +1154,30 @@ function extend(a, b, underwrite) {
 hook('fetch', function(fetch) {
   return function(load) {
     load.metadata.scriptLoad = true;
+    // prepare amd define
+    this.get('@@amd-helpers').createDefine(this);
     return fetch.call(this, load);
+  };
+});
+
+// AMD support
+// script injection mode calls this function synchronously on load
+hook('onScriptLoad', function(onScriptLoad) {
+  return function(load) {
+    onScriptLoad.call(this, load);
+
+    var lastModule = this.get('@@amd-helpers').lastModule;
+    if (lastModule.anonDefine || lastModule.isBundle) {
+      load.metadata.format = 'defined';
+      load.metadata.registered = true;
+      lastModule.isBundle = false;
+    }
+
+    if (lastModule.anonDefine) {
+      load.metadata.deps = load.metadata.deps ? load.metadata.deps.concat(lastModule.anonDefine.deps) : lastModule.anonDefine.deps;
+      load.metadata.execute = lastModule.anonDefine.execute;
+      lastModule.anonDefine = null;
+    }
   };
 });/*
  * Instantiate registry extension
@@ -1137,6 +1216,7 @@ hook('fetch', function(fetch) {
 
     // named register
     if (name) {
+      name = loader.normalizeSync(name);
       register.name = name;
       if (!(name in loader.defined))
         loader.defined[name] = register; 
@@ -1234,7 +1314,7 @@ hook('fetch', function(fetch) {
         load.metadata.entry = anonRegister;
       
       if (calledRegister) {
-        load.metadata.format = load.metadata.format || 'register';
+        load.metadata.format = load.metadata.format || 'defined';
         load.metadata.registered = true;
         calledRegister = false;
         anonRegister = null;
@@ -1330,7 +1410,14 @@ hook('fetch', function(fetch) {
 
     var declaration = entry.declare.call(__global, function(name, value) {
       module.locked = true;
-      exports[name] = value;
+
+      if (typeof name == 'object') {
+        for (var p in name)
+          exports[p] = name[p];
+      }
+      else {
+        exports[name] = value;
+      }
 
       for (var i = 0, l = module.importers.length; i < l; i++) {
         var importerModule = module.importers[i];
@@ -1426,7 +1513,7 @@ hook('fetch', function(fetch) {
 
     var exports = {};
 
-    var module = entry.module = { exports: exports, id: entry.name, deps: entry.normalizedDeps };
+    var module = entry.module = { exports: exports, id: entry.name };
 
     // AMD requires execute the tree first
     if (!entry.executingRequire) {
@@ -1467,7 +1554,9 @@ hook('fetch', function(fetch) {
           entry.esModule[p] = exports[p];
       }
       entry.esModule['default'] = exports;
-      entry.esModule.__useDefault = true;
+      defineProperty(entry.esModule, '__useDefault', {
+        value: true
+      });
     }
   }
 
@@ -1532,6 +1621,9 @@ hook('fetch', function(fetch) {
       
       if (load.metadata.format == 'register')
         load.metadata.scriptLoad = true;
+
+      // NB remove when "deps " is deprecated
+      load.metadata.deps = load.metadata.deps || [];
       
       return fetch.call(this, load);
     };
@@ -1601,7 +1693,8 @@ hook('fetch', function(fetch) {
 
       // named bundles are just an empty module
       if (!entry)
-        return {
+        entry = {
+          declarative: false,
           deps: load.metadata.deps,
           execute: function() {
             return loader.newModule({});
@@ -1609,12 +1702,7 @@ hook('fetch', function(fetch) {
         };
 
       // place this module onto defined for circular references
-      if (entry)
-        loader.defined[load.name] = entry;
-
-      // no entry -> treat as ES6
-      else
-        return instantiate.call(loader, load);
+      loader.defined[load.name] = entry;
 
       entry.deps = dedupe(entry.deps);
       entry.name = load.name;

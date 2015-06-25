@@ -2,7 +2,7 @@
 
 (function(global) {
 
-QUnit.config.testTimeout = 2000;
+QUnit.config.testTimeout = 30000;
 
 QUnit.module("SystemJS");
 
@@ -144,7 +144,7 @@ asyncTest('Support the empty module', function() {
 });
 
 asyncTest('Global script with shim config exports', function() {
-  System.meta['tests/global-shim-config-exports.js'] = { exports: 'p' };
+  System.meta[System.normalizeSync('tests/global-shim-config-exports.js')] = { exports: 'p' };
   System['import']('tests/global-shim-config-exports.js').then(function(m) {
     ok(m == 'export', 'Exports not shimmed');
     start();
@@ -168,10 +168,18 @@ asyncTest('Map configuration subpath', function() {
 });
 
 asyncTest('Contextual map configuration', function() {
-  System.packages['tests/contextual-test'] = { main: 'contextual-map.js' };
-  System.map['tests/contextual-test'] = {
-    maptest: 'tests/contextual-map-dep.js'
-  };
+  System.config({
+    packages: {
+      'tests/contextual-test': {
+        main: 'contextual-map.js'
+      }
+    },
+    map: {
+      'tests/contextual-test': {
+        maptest: '../contextual-map-dep.js'
+      }
+    }
+  });
   System['import']('tests/contextual-test').then(function(m) {
     ok(m.mapdep == 'mapdep', 'Contextual map dep not loaded');
     start();
@@ -179,16 +187,20 @@ asyncTest('Contextual map configuration', function() {
 });
 
 asyncTest('Package map with shim', function() {
-  System.packages['tests/shim-package'] = {
-    meta: {
-      '*': {
-        deps: ['shim-map-dep']
+  System.config({
+    packages: {
+      'tests/shim-package': {
+        meta: {
+          '*': {
+            deps: ['shim-map-dep']
+          }
+        },
+        map: {
+          'shim-map-dep': '../shim-map-test-dep.js'
+        }
       }
-    },
-    map: {
-      'shim-map-dep': 'tests/shim-map-test-dep.js'
     }
-  };
+  });
   System['import']('tests/shim-package/shim-map-test.js').then(function(m) {
     ok(m == 'depvalue', 'shim dep not loaded');
     start();
@@ -196,7 +208,13 @@ asyncTest('Package map with shim', function() {
 });
 
 asyncTest('Loading an AMD module', function() {
-  System.meta['tests/amd-module.js'] = { format: 'amd' };
+  System.config({
+    meta: {
+      'tests/amd-module.js': {
+        format: 'amd'
+      }
+    }
+  });
   System['import']('tests/amd-module.js').then(function(m) {
     ok(m.amd == true, 'Incorrect module');
     ok(m.dep.amd == 'dep', 'Dependency not defined');
@@ -234,7 +252,11 @@ asyncTest('AMD with dynamic require callback', function() {
   });
 });
 
-System.bundles['tests/amd-bundle.js'] = ['bundle-1', 'bundle-2'];
+System.config({
+  bundles: {
+    'tests/amd-bundle.js': ['bundle-1', 'bundle-2']
+  }
+});
 
 asyncTest('Loading an AMD bundle', function() {
   System['import']('bundle-1').then(function(m) {
@@ -262,6 +284,14 @@ asyncTest('Loading an AMD named define', function() {
 asyncTest('Loading AMD CommonJS form', function() {
   System['import']('tests/amd-cjs-module.js').then(function(m) {
     ok(m.test == 'hi', 'Not defined');
+    start();
+  }, err);
+});
+
+asyncTest('AMD contextual require toUrl', function() {
+  System['import']('tests/amd-contextual.js').then(function(m) {
+    ok(m.name == System.baseURL + 'tests/amd-contextual.js');
+    ok(m.rel == System.baseURL + 'rel-path.js');
     start();
   }, err);
 });
@@ -295,6 +325,7 @@ asyncTest('CommonJS detection variation 1', function() {
   }, err);
 });
 
+if (!ie8)
 asyncTest('CommonJS detection variation 2', function() {
   System['import']('tests/commonjs-variation2.js').then(function(m) {
     ok(typeof m.OpaqueToken === 'function');
@@ -348,6 +379,15 @@ asyncTest('Loading CJS with format hint', function() {
   }, err);
 });
 
+asyncTest('CommonJS globals', function() {
+  System['import']('tests/cjs-globals.js').then(function(m) {
+    ok(m.filename.match(/tests\/cjs-globals\.js$/));
+    ok(m.dirname.match(/\/tests$/));
+    ok(m.global == global);
+    start();
+  }, err);
+});
+
 asyncTest('Versions', function() {
   System['import']('tests/zero@0.js').then(function(m) {
     ok(m == '0');
@@ -364,15 +404,6 @@ asyncTest('Simple compiler Plugin', function() {
   }, err);
 });
 
-asyncTest('Mapping to a plugin', function() {
-  System.map['pluginrequest'] = 'tests/compiled.coffee!';
-  System.map['coffee'] = 'tests/compiler-plugin.js';
-  System['import']('pluginrequest').then(function(m) {
-    ok(m.extra == 'yay!', 'Plugin not applying.');
-    start();
-  }, err);
-});
-
 asyncTest('Mapping a plugin argument', function() {
   System.map['bootstrap'] = 'tests/bootstrap@3.1.1';
   System.map['coffee'] = 'tests/compiler-plugin.js';
@@ -384,7 +415,7 @@ asyncTest('Mapping a plugin argument', function() {
 
 asyncTest('Advanced compiler plugin', function() {
   System['import']('tests/compiler-test.js!tests/advanced-plugin.js').then(function(m) {
-    ok(m == 'custom fetch:tests/compiler-test.js!tests/advanced-plugin.js', m);
+    ok(m == 'custom fetch:' + System.baseURL + 'tests/compiler-test.js!' + System.baseURL + 'tests/advanced-plugin.js', m);
     start();
   }, err);
 });
@@ -413,7 +444,13 @@ asyncTest('CJS Circular', function() {
 });
 
 asyncTest('System.register Circular', function() {
-  System.meta['tests/register-circular1.js'] = { scriptLoad: true };
+  System.config({
+    meta: {
+      'tests/register-circular1.js': {
+        scriptLoad: true
+      }
+    }
+  });
   System['import']('tests/register-circular1.js').then(function(m) {
     ok(m.q == 3, 'Binding not allocated');
     ok(m.r == 5, 'Binding not updated');
@@ -422,14 +459,22 @@ asyncTest('System.register Circular', function() {
 });
 
 asyncTest('System.register group linking test', function() {
-  System.bundles['tests/group-test.js'] = ['group-a'];
+  System.config({
+    bundles: {
+      'tests/group-test.js': ['group-a']
+    }
+  });
   System['import']('group-a').then(function(m) {
     ok(m);
     start();
   }, err);
 });
 
-System.bundles['tests/mixed-bundle.js'] = ['tree/third', 'tree/cjs', 'tree/jquery', 'tree/second', 'tree/global', 'tree/amd', 'tree/first'];
+System.config({
+  bundles: {
+    'tests/mixed-bundle.js': ['tree/third', 'tree/cjs', 'tree/jquery', 'tree/second', 'tree/global', 'tree/amd', 'tree/first']
+  }
+});
 
 asyncTest('Loading AMD from a bundle', function() {
   System['import']('tree/amd').then(function(m) {
@@ -438,8 +483,11 @@ asyncTest('Loading AMD from a bundle', function() {
   }, err);
 });
 
-
-System.bundles['tests/mixed-bundle.js'] = ['tree/third', 'tree/cjs', 'tree/jquery', 'tree/second', 'tree/global', 'tree/amd', 'tree/first'];
+System.config({
+  bundles: {
+    'tests/mixed-bundle.js': ['tree/third', 'tree/cjs', 'tree/jquery', 'tree/second', 'tree/global', 'tree/amd', 'tree/first']
+  }
+});
 asyncTest('Loading CommonJS from a bundle', function() {
   System['import']('tree/cjs').then(function(m) {
     ok(m.cjs === true);
@@ -477,7 +525,7 @@ asyncTest('AMD simplified CommonJS wrapping with an aliased require', function()
 
 asyncTest('Loading dynamic modules with __esModule flag set', function() {
   System['import']('tests/es-module-flag.js').then(function() {
-    m = System.get('tests/es-module-flag.js');
+    m = System.get(System.normalizeSync('tests/es-module-flag.js'));
     ok(m.exportName == 'export');
     ok(m['default'] == 'default export');
     ok(m.__esModule === true);
@@ -628,7 +676,7 @@ asyncTest('Loading ES6 and AMD', function() {
 
 asyncTest('Module Name meta', function() {
   System['import']('tests/reflection.js').then(function(m) {
-    ok(m.myname == 'tests/reflection.js', 'Module name not returned');
+    ok(m.myname == System.normalizeSync('tests/reflection.js'), 'Module name not returned');
     start();
   }, err);
 });
@@ -692,8 +740,12 @@ asyncTest('Loading a connected tree that connects ES and CJS modules', function(
 });
 
 asyncTest('Loading two bundles that have a shared dependency', function() {
-  System.bundles["tests/shared-dep-bundles/a.js"] = ["lib/shared-dep", "lib/a"];
-  System.bundles["tests/shared-dep-bundles/b.js"] = ["lib/shared-dep", "lib/b"];
+  System.config({
+    bundles: {
+      "tests/shared-dep-bundles/a.js": ["lib/shared-dep", "lib/a"],
+      "tests/shared-dep-bundles/b.js": ["lib/shared-dep", "lib/b"]
+    }
+  });
   expect(0);
   System['import']('lib/a').then(function() {
     System['import']('lib/b').then(function() {
@@ -705,6 +757,9 @@ asyncTest('Loading two bundles that have a shared dependency', function() {
 
 asyncTest("System clone", function() {
   var clonedSystem = new System.constructor();
+
+  clonedSystem.paths['*'] = System.paths['*'];
+  clonedSystem.baseURL = System.baseURL;
 
   System.map['maptest'] = 'tests/map-test.js';
   clonedSystem.map['maptest'] = 'tests/map-test-dep.js';
@@ -723,7 +778,7 @@ asyncTest("System clone", function() {
 
 if(typeof window !== 'undefined' && window.Worker) {
   asyncTest('Using SystemJS in a Web Worker', function() {
-    var worker = new Worker('tests/worker-' + System.transpiler + '.js');
+    var worker = new Worker('./tests/worker-' + System.transpiler + '.js');
     worker.onmessage = function(e) {
       ok(e.data.amd === 'AMD Module');
       ok(e.data.es6 === 'ES6 Module');
@@ -735,7 +790,7 @@ if(typeof window !== 'undefined' && window.Worker) {
 // new features!!
 
 asyncTest('Named imports for non-es6', function() {
-  System['import']('./tests/es6-cjs-named-export.js').then(function(m) {
+  System['import']('tests/es6-cjs-named-export.js').then(function(m) {
     ok(m.someExport == 'asdf');
     start();
   }, err);
@@ -744,14 +799,14 @@ asyncTest('Named imports for non-es6', function() {
 asyncTest('Globals', function() {
   System.config({
     meta: {
-      './tests/with-global-deps.js': {
+      'tests/with-global-deps.js': {
         globals: {
           '$$$': 'tests/dep.js'
         }
       }
     }
   });
-  System['import']('./tests/with-global-deps.js').then(function(m) {
+  System['import']('tests/with-global-deps.js').then(function(m) {
     for (var p in m)
       ok(false);
     ok(true);
@@ -786,7 +841,7 @@ asyncTest('Wildcard meta', function() {
 asyncTest('Package configuration CommonJS config example', function() {
   System.config({
     packages: {
-      './tests/testpkg': {
+      'tests/testpkg': {
         main: './noext',
         format: 'cjs',
         defaultExtension: 'js',
@@ -797,22 +852,34 @@ asyncTest('Package configuration CommonJS config example', function() {
         map: {
           './json': './json.json',
           './dir/': './dir/index.js',
-          './dir2': './dir2/index.json'
+          './dir2': './dir2/index.json',
+          './dir/test': './test.ts'
+        },
+        env: {
+          browser: {
+            map: {
+              './env-module': './env-module-browser.js'
+            }
+          }
         }
       }
     }
   });
 
   Promise.all([
-    System['import']('./tests/testpkg'),
-    System['import']('./tests/testpkg/json'),
-    System['import']('./tests/testpkg/dir/'),
-    System['import']('./tests/testpkg/dir2')
+    System['import']('tests/testpkg'),
+    System['import']('tests/testpkg/json'),
+    System['import']('tests/testpkg/dir/test'),
+    System['import']('tests/testpkg/dir2'),
+    System['import']('tests/testpkg/dir/'),
+    System['import']('tests/testpkg/env-module')
   ]).then(function(m) {
     ok(m[0].prop == 'value');
     ok(m[1].prop == 'value');
-    ok(m[2] == 'dirindex');
+    ok(m[2] == 'ts');
     ok(m[3].json == 'index');
+    ok(m[4] == 'dirindex');
+    ok(m[5] == typeof window != 'undefined' ? 'browser' : 'not browser');
     start();
   }, err);
 });
@@ -820,18 +887,26 @@ asyncTest('Package configuration CommonJS config example', function() {
 asyncTest('Conditional loading', function() {
   System.set('env', System.newModule({ 'browser': 'ie' }));
 
-  System['import']('./tests/branch-#{env.browser}.js').then(function(m) {
+  System['import']('tests/branch-#{env.browser}.js').then(function(m) {
     ok(m.branch == 'ie');
     start();
   }, err);
 });
 
-asyncTest('Boolean conditional', function() {
+asyncTest('Boolean conditional false', function() {
   System.set('env', System.newModule({ 'js': { 'es5': false } }));
 
-  System['import']('./tests/branch-boolean.js#?env.js.es5').then(function(m) {
-
+  System['import']('tests/branch-boolean.js#?env.js.es5').then(function(m) {
     ok(m === System.get('@empty'));
+    start();
+  }, err);
+});
+
+asyncTest('Boolean conditional true', function() {
+  System.set('env', System.newModule({ 'js': { 'es5': true } }));
+
+  System['import']('tests/branch-boolean.js#?env.js.es5').then(function(m) {
+    ok(m['default'] === true);
     start();
   }, err);
 });
