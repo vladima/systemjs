@@ -1,5 +1,5 @@
 /*
- * SystemJS v0.18.2
+ * SystemJS v0.18.4
  */
 (function() {
 function bootstrap() {(function(__global) {
@@ -93,13 +93,7 @@ function bootstrap() {(function(__global) {
     throw new TypeError('No environment baseURI');
   }
 
-  var URL = __global.URL;
-  try {
-    new URL('test:///').protocol == 'test:';
-  }
-  catch(e) {
-    URL = URLPolyfill;
-  }
+  var URL = __global.URLPolyfill || __global.URL;
 /*
 *********************************************************************************************
 
@@ -1986,11 +1980,23 @@ SystemJSLoader.prototype.config = function(cfg) {
       entry.esModule = exports;
     }
     else {
-      var hasOwnProperty = exports && exports.hasOwnProperty;
       entry.esModule = {};
-      for (var p in exports) {
-        if (!hasOwnProperty || exports.hasOwnProperty(p))
-          entry.esModule[p] = exports[p];
+
+      // don't trigger getters/setters in environments that support them
+      if (typeof exports == 'object' || typeof exports == 'function') {
+        if (Object.getOwnPropertyDescriptor) {
+          var d;
+          for (var p in exports)
+            if (d = Object.getOwnPropertyDescriptor(exports, p))
+              Object.defineProperty(entry.esModule, p, d);
+        }
+        else {
+          var hasOwnProperty = exports && exports.hasOwnProperty;
+          for (var p in exports) {
+            if (!hasOwnProperty || exports.hasOwnProperty(p))
+              entry.esModule[p] = exports[p];
+          }
+        }
       }
       entry.esModule['default'] = exports;
       defineProperty(entry.esModule, '__useDefault', {
@@ -2045,7 +2051,7 @@ SystemJSLoader.prototype.config = function(cfg) {
     };
   });
 
-  var registerRegEx = /^\s*(\/\*.*\*\/\s*|\/\/[^\n]*\s*)*System\.register(Dyanmic)?\s*\(/;
+  var registerRegEx = /^\s*(\/\*.*\*\/\s*|\/\/[^\n]*\s*)*System\.register(Dynamic)?\s*\(/;
 
   hook('fetch', function(fetch) {
     return function(load) {
@@ -3127,8 +3133,9 @@ hook('normalize', function(normalize) {
           var defaultExtension = '';
           if (!pkg.meta || !pkg.meta[normalized.substr(pkgName.length + 1)]) {
             // apply defaultExtension
-            if (pkg.defaultExtension) {
-              if (normalized.split('/').pop().indexOf('.') == -1)
+
+            if ('defaultExtension' in pkg) {
+              if (pkg.defaultExtension !== false && normalized.split('/').pop().indexOf('.') == -1)
                 defaultExtension = '.' + pkg.defaultExtension;
             }
             // apply defaultJSExtensions if defaultExtension not set
